@@ -6,6 +6,8 @@ param (
 $ConfigFile = $SettingsFile
 
 while ($true) {
+	$intervalSeconds = 300
+
     try {
 		if (-not $ConfigFile) {
     		$ConfigFile = Join-Path $PSScriptRoot "ddns-dynu.conf"
