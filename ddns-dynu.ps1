@@ -1,7 +1,9 @@
 param (
-	[Alias("c", "config", "configfile")]
-    [string]$ConfigFile
+	[Alias("c", "conf")]
+    [string]$SettingsFile
 )
+
+$ConfigFile = $SettingsFile
 
 while ($true) {
     try {
