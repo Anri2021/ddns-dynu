@@ -1,6 +1,12 @@
-﻿while ($true) {
+param (
+    [string]$ConfigFile
+)
+
+while ($true) {
     try {
-		$ConfigFile = Join-Path $PSScriptRoot "ddns.conf"
+		if (-not $ConfigFile) {
+    		$ConfigFile = Join-Path $PSScriptRoot "ddns-dynu.conf"
+		}
 		if (-not (Test-Path $ConfigFile)) {
 			throw "Config file not found at: $ConfigFile"
 		}
