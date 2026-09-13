@@ -1,5 +1,5 @@
 param (
-	[Alias("c", "config")]
+	[Alias("c", "config", "configfile")]
     [string]$ConfigFile
 )
 
