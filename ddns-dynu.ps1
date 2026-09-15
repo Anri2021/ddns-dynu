@@ -19,30 +19,26 @@ while ($true) {
 		$Config = Get-Content $ConfigFile -Raw | ConvertFrom-Json
 		
 		$headers    = @{ "API-Key" = $Config.ApiKey; "Content-Type" = "application/json" }
-		$username = $Config.Username
-		$password = $Config.Password
 		$dnsId      = $Config.DnsId
 		$baseDomain = $Config.BaseDomain
 		$subdomains = $Config.Subdomains
 		$intervalSeconds = $Config.IntervalSeconds
-		
-		
-		# 1. בדיקת שער (Circuit Breaker) - אימות ApiKey ו-DnsId מול REST API v2
+
+		# 1. שליפת נתוני הדומיין והרשומות (מאמת במכה אחת את ה-ApiKey וה-DnsId)
+		$rootInfo = $null
 		$dynuRecords = $null
 		try {
-			$apiResult = Invoke-RestMethod "https://api.dynu.com/v2/dns/$dnsId/record" -Headers $headers -ErrorAction Stop
-			if (-not $apiResult.dnsRecords) {
-				throw "Dynu Config Error [Field: DnsId]: No DNS records found for DnsId '$dnsId'."
-			}
+			$rootInfo    = Invoke-RestMethod "https://api.dynu.com/v2/dns/$dnsId" -Headers $headers -ErrorAction Stop
+			$apiResult   = Invoke-RestMethod "https://api.dynu.com/v2/dns/$dnsId/record" -Headers $headers -ErrorAction Stop
 			$dynuRecords = @($apiResult.dnsRecords)
 		}
 		catch {
 			$code = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
 			if ($code -in @(401, 403)) {
-				throw "Dynu Auth Error (HTTP $code) [Field: ApiKey]: Invalid API Key. Verify 'ApiKey' in config."
+				throw "Dynu Auth Error (HTTP $code) [Field: ApiKey]: Invalid API Key. Check 'ApiKey' in config."
 			}
 			elseif ($code -in @(404, 501)) {
-				throw "Dynu Config Error (HTTP $code) [Field: DnsId]: Invalid or non-existent DnsId '$dnsId'. Verify 'DnsId' in config."
+				throw "Dynu Config Error (HTTP $code) [Field: DnsId]: Invalid DnsId '$dnsId'. Check 'DnsId' in config."
 			}
 			else {
 				Write-Warning "Dynu Network Issue: $($_.Exception.Message). Retrying in $intervalSeconds seconds..."
@@ -50,7 +46,7 @@ while ($true) {
 				continue
 			}
 		}
-
+		
 		# 2. רק אם ה-API אומת בהצלחה - תשאול מתאמי הרשת וכתובות ה-IP
 		$ifIndex = (Get-NetRoute -DestinationPrefix '::/0' -AddressFamily IPv6 -ErrorAction SilentlyContinue | 
 					Sort-Object RouteMetric | Select-Object -ExpandProperty InterfaceIndex -First 1)
@@ -64,53 +60,51 @@ while ($true) {
 
 		$ip4 = (Resolve-DnsName myip.opendns.com -Server 208.67.222.222 -Type A -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress } | Select-Object -ExpandProperty IPAddress -First 1)
 		if (-not $ip4) { $ip4 = (Invoke-RestMethod "https://api.ipify.org" -TimeoutSec 3 -ErrorAction SilentlyContinue) }
+
 		
 		foreach ($rec in $subdomains) {
-			# שיוך אוטומטי של כתובת היעד לפי סוג הרשומה
+			$ipField  = if ($rec.Type -eq 'A') { 'ipv4Address' } else { 'ipv6Address' }
 			$targetIP = if ($rec.Type -eq 'A') { $ip4 } else { $ip6 }
 			if (-not $targetIP) { continue }
-		
-			$fqdn = if ([string]::IsNullOrWhiteSpace($rec.Node)) { $BaseDomain } else { "$($rec.Node).$BaseDomain" }
-		
-			if ([string]::IsNullOrWhiteSpace($rec.Node)) {
-				# עדכון דומיין שורש דרך ממשק ה-DDNS הרגיל
-				$currentValue = (Resolve-DnsName $fqdn -Server ns1.dynu.com -Type $rec.Type -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress } | Select-Object -ExpandProperty IPAddress -First 1)
-				if ($currentValue -ne $targetIP) {
-					$param = if ($rec.Type -eq 'A') { "myip" } else { "myipv6" }
-					$updateUri = "https://api.dynu.com/nic/update?hostname=$fqdn&$param=$targetIP&username=$username&password=$([System.Uri]::EscapeDataString($password))"
-					$updateResp = Invoke-RestMethod -Uri $updateUri -ErrorAction Stop
-					if ($updateResp -match 'badauth') {
-						throw "Dynu Auth Error [Fields: Username / Password / BaseDomain]: Authentication failed for '$fqdn'. Check Username, Password or Domain ownership."
-					}
-					elseif ($updateResp -match 'nohost') {
-						throw "Dynu Domain Error [Field: BaseDomain]: Hostname '$fqdn' does not exist in Dynu."
-					}
-					Write-Host "Dynu DDNS: Updated root $fqdn ($($rec.Type)) -> $targetIP" -ForegroundColor Green
-				}
+
+			$isRoot = [string]::IsNullOrWhiteSpace($rec.Node)
+			$fqdn   = if ($isRoot) { $baseDomain } else { "$($rec.Node).$baseDomain" }
+
+			# הכנת כתובת היעד והגוף (הפרדה מינימלית בלבד)
+			if ($isRoot) {
+				$currentValue = $rootInfo.$ipField
+				$targetUri    = "https://api.dynu.com/v2/dns/$dnsId"
+				$body         = @{ name = $baseDomain; $ipField = $targetIP }
 			} else {
-				# זיהוי דינמי של ה-ID מתוך הרשומות שנטענו לזיכרון
 				$live = $dynuRecords | Where-Object { $_.nodeName -eq $rec.Node -and $_.recordType -eq $rec.Type } | Select-Object -First 1
-		
-				if ($live) {
-					$currentValue = if ($rec.Type -eq 'A') { $live.ipv4Address } else { $live.ipv6Address }
-		
-					if ($currentValue -ne $targetIP) {
-						$body = @{ 
-							nodeName   = $rec.Node
-							recordType = $rec.Type
-							ttl        = 120
-							state      = $true 
-						}
-						if (-not [string]::IsNullOrWhiteSpace($live.group)) { $body["group"] = $live.group }
-						if ($rec.Type -eq 'A') { $body["ipv4Address"] = $targetIP } else { $body["ipv6Address"] = $targetIP }
-		
-						Invoke-RestMethod -Method Post -Uri "https://api.dynu.com/v2/dns/$DnsId/record/$($live.id)" -Headers $headers -Body ($body | ConvertTo-Json)
-					}
+				if (-not $live) {
+					Write-Warning "Dynu Config Warning: Subdomain '$fqdn' ($($rec.Type)) was not found in Dynu DNS records."
+					continue
+				}
+				$currentValue = $live.$ipField
+				$targetUri    = "https://api.dynu.com/v2/dns/$dnsId/record/$($live.id)"
+				$body         = @{
+					nodeName   = $rec.Node
+					recordType = $rec.Type
+					ttl        = 120
+					state      = $true
+					$ipField   = $targetIP
+				}
+				if (-not [string]::IsNullOrWhiteSpace($live.group)) { $body["group"] = $live.group }
+			}
+
+			# ביצוע, הגנה מכישלון בודד ודיווח מרוכז
+			if ($currentValue -ne $targetIP) {
+				try {
+					Invoke-RestMethod -Method Post -Uri $targetUri -Headers $headers -Body ($body | ConvertTo-Json) -ErrorAction Stop
+					Write-Host "Dynu DDNS: Updated $fqdn ($($rec.Type)) -> $targetIP via REST API" -ForegroundColor Green
+				}
+				catch {
+					Write-Error "Dynu DDNS Error: Failed updating $fqdn ($($rec.Type)): $($_.Exception.Message)"
 				}
 			}
 		}
 	}
-
     catch {
         Write-Error $_
     }
