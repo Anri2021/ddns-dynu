@@ -52,9 +52,9 @@ while ($true) {
 		}
 
 		# אימות Username ו-Password מול פרוטוקול העדכון ללא שינוי כתובות ה-IP
-		$authCheck = Invoke-RestMethod "https://api.dynu.com/nic/update?hostname=check.invalid&username=$username&password=$([System.Uri]::EscapeDataString($password))" -ErrorAction SilentlyContinue
+		$authCheck = Invoke-RestMethod "https://api.dynu.com/nic/update?hostname=$baseDomain&username=$username&password=$([System.Uri]::EscapeDataString($password))" -ErrorAction SilentlyContinue
 		if ($authCheck -match 'badauth') {
-			throw 'Dynu Auth Error: Invalid Username or Password. Check credentials in config.'
+		    throw 'Dynu Auth Error: Invalid Username or Password. Check credentials in config.'
 		}
 
 		# 2. רק אם ה-API אומת בהצלחה - תשאול מתאמי הרשת וכתובות ה-IP
