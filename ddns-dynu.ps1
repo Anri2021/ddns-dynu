@@ -27,22 +27,40 @@ while ($true) {
 		$intervalSeconds = $Config.IntervalSeconds
 		
 		
-		# 1. בדיקת שער (Circuit Breaker) - זיהוי שגיאות ממוקד לפי סטטוס HTTP
+		# 1. בדיקת שער (Circuit Breaker) - בדיקת תוכן התשובה המדויקת שחזרה מ-Dynu
 		$dynuRecords = $null
 		try {
 			$apiResult = Invoke-RestMethod "https://api.dynu.com/v2/dns/$dnsId/record" -Headers $headers -ErrorAction Stop
+
+			# בדיקת גוף התשובה במקרה של קוד פנימי מ-Dynu
+			if ($apiResult.statusCode -and $apiResult.statusCode -ne 200) {
+				throw "Dynu API Error ($($apiResult.statusCode)): $($apiResult.message)"
+			}
 			if (-not $apiResult.dnsRecords) {
-				throw 'Dynu Error: No DNS records returned for this domain.'
+				throw "Dynu Error: No DNS records found for DnsId '$dnsId'."
 			}
 			$dynuRecords = @($apiResult.dnsRecords)
 		}
 		catch {
-			$statusCode = $_.Exception.Response.StatusCode.value__
-			if ($statusCode -in @(401, 403)) {
-				throw 'Dynu Auth Error (401/403): Invalid ApiKey or unauthorized access. Check ApiKey in config.'
+			# חילוץ גוף הודעת השגיאה המקורית ש-Dynu שלחה
+			$errorText = $_.ErrorDetails.Message
+			if (-not $errorText -and $_.Exception.Response) {
+				try {
+					$stream = $_.Exception.Response.GetResponseStream()
+					if ($stream) { $errorText = [System.IO.StreamReader]::new($stream).ReadToEnd() }
+				} catch {}
 			}
-			elseif ($statusCode -eq 404) {
-				throw "Dynu Config Error (404): DnsId '$dnsId' not found. Check DnsId in config."
+
+			# בדיקת התוכן שחזר וזריקת שגיאה לפי הפירוט
+			if ($errorText -match '(?i)(unauthorized|api\s*key)') {
+				throw "Dynu Auth Error: ApiKey is invalid. Server response: $errorText"
+			}
+			elseif ($errorText -match '(?i)(not\s*found|dns)') {
+				throw "Dynu Config Error: DnsId '$dnsId' was not found. Server response: $errorText"
+			}
+			elseif ($_.Exception.Response) {
+				$code = [int]$_.Exception.Response.StatusCode
+				throw "Dynu API Error (HTTP $code): $($_.Exception.Message). Server response: $errorText"
 			}
 			else {
 				Write-Warning "Dynu Connection Issue: $($_.Exception.Message). Retrying in $intervalSeconds seconds..."
