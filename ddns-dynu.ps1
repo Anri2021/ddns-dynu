@@ -30,7 +30,7 @@ while ($true) {
 		# 1. בדיקת שער (Circuit Breaker) - אימות API ושליפת רשומות מוקדמת
 		$apiResult = Invoke-RestMethod "https://api.dynu.com/v2/dns/$dnsId/record" -Headers $headers -ErrorAction Stop
 		if (-not $apiResult -or -not $apiResult.dnsRecords) {
-			throw "Dynu API Error: לא התקבלו רשומות מ-Dynu. בדוק את ה-ApiKey ואת ה-DnsId."
+			throw 'Dynu API Error: לא התקבלו רשומות מ-Dynu. בדוק את ה-ApiKey ואת ה-DnsId.'
 		}
 		$dynuRecords = @($apiResult.dnsRecords)
 
