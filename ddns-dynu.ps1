@@ -28,11 +28,29 @@ while ($true) {
 		
 		
 		# 1. בדיקת שער (Circuit Breaker) - אימות API ושליפת רשומות מוקדמת
-		$apiResult = Invoke-RestMethod "https://api.dynu.com/v2/dns/$dnsId/record" -Headers $headers -ErrorAction Stop
-		if (-not $apiResult -or -not $apiResult.dnsRecords) {
-			throw 'Dynu API Error: לא התקבלו רשומות מ-Dynu. בדוק את ה-ApiKey ואת ה-DnsId.'
+		# 1. בדיקת שער (Circuit Breaker) - זיהוי שגיאות ממוקד לפי סטטוס HTTP
+		$dynuRecords = $null
+		try {
+			$apiResult = Invoke-RestMethod "https://api.dynu.com/v2/dns/$dnsId/record" -Headers $headers -ErrorAction Stop
+			if (-not $apiResult.dnsRecords) {
+				throw 'Dynu Error: No DNS records returned for this domain.'
+			}
+			$dynuRecords = @($apiResult.dnsRecords)
 		}
-		$dynuRecords = @($apiResult.dnsRecords)
+		catch {
+			$statusCode = $_.Exception.Response.StatusCode.value__
+			if ($statusCode -in @(401, 403)) {
+				throw 'Dynu Auth Error (401/403): Invalid ApiKey or unauthorized access. Check ApiKey in config.'
+			}
+			elseif ($statusCode -eq 404) {
+				throw "Dynu Config Error (404): DnsId '$dnsId' not found. Check DnsId in config."
+			}
+			else {
+				Write-Warning "Dynu Connection Issue: $($_.Exception.Message). Retrying in $intervalSeconds seconds..."
+				Start-Sleep -Seconds $intervalSeconds
+				continue
+			}
+		}
 
 		# 2. רק אם ה-API אומת בהצלחה - תשאול מתאמי הרשת וכתובות ה-IP
 		$ifIndex = (Get-NetRoute -DestinationPrefix '::/0' -AddressFamily IPv6 -ErrorAction SilentlyContinue | 
