@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param (
-	[Alias("c", "conf")]
+	[Alias("c", "conf", "config")]
     [string]$SettingsFile
 )
 
@@ -27,34 +27,28 @@ while ($true) {
 		$intervalSeconds = $Config.IntervalSeconds
 		
 		
-		# 1. בדיקת שער (Circuit Breaker) - אימות ApiKey, DnsId, ופרטי התחברות בראש האיטרציה
+		# 1. בדיקת שער (Circuit Breaker) - אימות ApiKey ו-DnsId מול REST API v2
 		$dynuRecords = $null
 		try {
 			$apiResult = Invoke-RestMethod "https://api.dynu.com/v2/dns/$dnsId/record" -Headers $headers -ErrorAction Stop
 			if (-not $apiResult.dnsRecords) {
-				throw "Dynu Config Error: No DNS records returned for DnsId '$dnsId'."
+				throw "Dynu Config Error [Field: DnsId]: No DNS records found for DnsId '$dnsId'."
 			}
 			$dynuRecords = @($apiResult.dnsRecords)
 		}
 		catch {
 			$code = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
 			if ($code -in @(401, 403)) {
-				throw "Dynu Auth Error (HTTP $code): Invalid ApiKey. Check ApiKey in config."
+				throw "Dynu Auth Error (HTTP $code) [Field: ApiKey]: Invalid API Key. Verify 'ApiKey' in config."
 			}
-			elseif ($code -eq 404) {
-				throw "Dynu Config Error (HTTP 404): DnsId '$dnsId' not found. Check DnsId in config."
+			elseif ($code -in @(404, 501)) {
+				throw "Dynu Config Error (HTTP $code) [Field: DnsId]: Invalid or non-existent DnsId '$dnsId'. Verify 'DnsId' in config."
 			}
 			else {
-				Write-Warning "Dynu Connection Issue: $($_.Exception.Message). Retrying in $intervalSeconds seconds..."
+				Write-Warning "Dynu Network Issue: $($_.Exception.Message). Retrying in $intervalSeconds seconds..."
 				Start-Sleep -Seconds $intervalSeconds
 				continue
 			}
-		}
-
-		# אימות Username ו-Password מול פרוטוקול העדכון ללא שינוי כתובות ה-IP
-		$authCheck = Invoke-RestMethod "https://api.dynu.com/nic/update?hostname=$baseDomain&username=$username&password=$([System.Uri]::EscapeDataString($password))" -ErrorAction SilentlyContinue
-		if ($authCheck -match 'badauth') {
-		    throw 'Dynu Auth Error: Invalid Username or Password. Check credentials in config.'
 		}
 
 		# 2. רק אם ה-API אומת בהצלחה - תשאול מתאמי הרשת וכתובות ה-IP
@@ -83,7 +77,15 @@ while ($true) {
 				$currentValue = (Resolve-DnsName $fqdn -Server ns1.dynu.com -Type $rec.Type -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress } | Select-Object -ExpandProperty IPAddress -First 1)
 				if ($currentValue -ne $targetIP) {
 					$param = if ($rec.Type -eq 'A') { "myip" } else { "myipv6" }
-					Invoke-RestMethod "https://api.dynu.com/nic/update?hostname=$fqdn&$param=$targetIP&username=$username&password=$([System.Uri]::EscapeDataString($password))"
+					$updateUri = "https://api.dynu.com/nic/update?hostname=$fqdn&$param=$targetIP&username=$username&password=$([System.Uri]::EscapeDataString($password))"
+					$updateResp = Invoke-RestMethod -Uri $updateUri -ErrorAction Stop
+					if ($updateResp -match 'badauth') {
+						throw "Dynu Auth Error [Fields: Username / Password / BaseDomain]: Authentication failed for '$fqdn'. Check Username, Password or Domain ownership."
+					}
+					elseif ($updateResp -match 'nohost') {
+						throw "Dynu Domain Error [Field: BaseDomain]: Hostname '$fqdn' does not exist in Dynu."
+					}
+					Write-Host "Dynu DDNS: Updated root $fqdn ($($rec.Type)) -> $targetIP" -ForegroundColor Green
 				}
 			} else {
 				# זיהוי דינמי של ה-ID מתוך הרשומות שנטענו לזיכרון
