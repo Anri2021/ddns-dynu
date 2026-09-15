@@ -27,23 +27,26 @@ while ($true) {
 		$intervalSeconds = $Config.IntervalSeconds
 		
 		
+		# 1. בדיקת שער (Circuit Breaker) - אימות API ושליפת רשומות מוקדמת
+		$apiResult = Invoke-RestMethod "https://api.dynu.com/v2/dns/$dnsId/record" -Headers $headers -ErrorAction Stop
+		if (-not $apiResult -or -not $apiResult.dnsRecords) {
+			throw "Dynu API Error: לא התקבלו רשומות מ-Dynu. בדוק את ה-ApiKey ואת ה-DnsId."
+		}
+		$dynuRecords = @($apiResult.dnsRecords)
+
+		# 2. רק אם ה-API אומת בהצלחה - תשאול מתאמי הרשת וכתובות ה-IP
 		$ifIndex = (Get-NetRoute -DestinationPrefix '::/0' -AddressFamily IPv6 -ErrorAction SilentlyContinue | 
 					Sort-Object RouteMetric | Select-Object -ExpandProperty InterfaceIndex -First 1)
-		# חישוב סיומת ה-64 ביט הקבועה (EUI-64) ישירות מכתובת ה-MAC של הכרטיס
 		$macBytes = (Get-NetAdapter -InterfaceIndex $ifIndex).MacAddress -split '[:-]' | ForEach-Object { [Convert]::ToByte($_, 16) }
 		$macBytes[0] = $macBytes[0] -bxor 0x02
 		$eui64Suffix = "{0:x2}{1:x2}:{2:x2}ff:fe{3:x2}:{4:x2}{5:x2}" -f $macBytes[0], $macBytes[1], $macBytes[2], $macBytes[3], $macBytes[4], $macBytes[5]
-		
-		# שליפת כתובת ה-GUA של סלקום: מתחילה ב-2 ומסתיימת בסיומת החומרה המדויקת שלך
+
 		$ip6 = (Get-NetIPAddress -InterfaceIndex $ifIndex -AddressFamily IPv6 -AddressState Preferred -ErrorAction SilentlyContinue | 
 				Where-Object { $_.IPAddress -like "[23]*:$eui64Suffix" } | 
 				Select-Object -ExpandProperty IPAddress -First 1)
-		
+
 		$ip4 = (Resolve-DnsName myip.opendns.com -Server 208.67.222.222 -Type A -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress } | Select-Object -ExpandProperty IPAddress -First 1)
 		if (-not $ip4) { $ip4 = (Invoke-RestMethod "https://api.ipify.org" -TimeoutSec 3 -ErrorAction SilentlyContinue) }
-
-		
-		$dynuRecords = @((Invoke-RestMethod "https://api.dynu.com/v2/dns/$DnsId/record" -Headers $headers).dnsRecords)
 		
 		foreach ($rec in $subdomains) {
 			# שיוך אוטומטי של כתובת היעד לפי סוג הרשומה
