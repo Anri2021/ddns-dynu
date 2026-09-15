@@ -27,46 +27,34 @@ while ($true) {
 		$intervalSeconds = $Config.IntervalSeconds
 		
 		
-		# 1. בדיקת שער (Circuit Breaker) - בדיקת תוכן התשובה המדויקת שחזרה מ-Dynu
+		# 1. בדיקת שער (Circuit Breaker) - אימות ApiKey, DnsId, ופרטי התחברות בראש האיטרציה
 		$dynuRecords = $null
 		try {
 			$apiResult = Invoke-RestMethod "https://api.dynu.com/v2/dns/$dnsId/record" -Headers $headers -ErrorAction Stop
-
-			# בדיקת גוף התשובה במקרה של קוד פנימי מ-Dynu
-			if ($apiResult.statusCode -and $apiResult.statusCode -ne 200) {
-				throw "Dynu API Error ($($apiResult.statusCode)): $($apiResult.message)"
-			}
 			if (-not $apiResult.dnsRecords) {
-				throw "Dynu Error: No DNS records found for DnsId '$dnsId'."
+				throw "Dynu Config Error: No DNS records returned for DnsId '$dnsId'."
 			}
 			$dynuRecords = @($apiResult.dnsRecords)
 		}
 		catch {
-			# חילוץ גוף הודעת השגיאה המקורית ש-Dynu שלחה
-			$errorText = $_.ErrorDetails.Message
-			if (-not $errorText -and $_.Exception.Response) {
-				try {
-					$stream = $_.Exception.Response.GetResponseStream()
-					if ($stream) { $errorText = [System.IO.StreamReader]::new($stream).ReadToEnd() }
-				} catch {}
+			$code = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
+			if ($code -in @(401, 403)) {
+				throw "Dynu Auth Error (HTTP $code): Invalid ApiKey. Check ApiKey in config."
 			}
-
-			# בדיקת התוכן שחזר וזריקת שגיאה לפי הפירוט
-			if ($errorText -match '(?i)(unauthorized|api\s*key)') {
-				throw "Dynu Auth Error: ApiKey is invalid. Server response: $errorText"
-			}
-			elseif ($errorText -match '(?i)(not\s*found|dns)') {
-				throw "Dynu Config Error: DnsId '$dnsId' was not found. Server response: $errorText"
-			}
-			elseif ($_.Exception.Response) {
-				$code = [int]$_.Exception.Response.StatusCode
-				throw "Dynu API Error (HTTP $code): $($_.Exception.Message). Server response: $errorText"
+			elseif ($code -eq 404) {
+				throw "Dynu Config Error (HTTP 404): DnsId '$dnsId' not found. Check DnsId in config."
 			}
 			else {
 				Write-Warning "Dynu Connection Issue: $($_.Exception.Message). Retrying in $intervalSeconds seconds..."
 				Start-Sleep -Seconds $intervalSeconds
 				continue
 			}
+		}
+
+		# אימות Username ו-Password מול פרוטוקול העדכון ללא שינוי כתובות ה-IP
+		$authCheck = Invoke-RestMethod "https://api.dynu.com/nic/update?hostname=check.invalid&username=$username&password=$([System.Uri]::EscapeDataString($password))" -ErrorAction SilentlyContinue
+		if ($authCheck -match 'badauth') {
+			throw 'Dynu Auth Error: Invalid Username or Password. Check credentials in config.'
 		}
 
 		# 2. רק אם ה-API אומת בהצלחה - תשאול מתאמי הרשת וכתובות ה-IP
